@@ -1,0 +1,158 @@
+name: Sync Open VHF with upstream
+
+on:
+  schedule:
+    - cron: '23 20 * * *' # 04:23 in Hong Kong
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: sync-open-vhf
+  cancel-in-progress: false
+
+env:
+  UPSTREAM_URL: https://github.com/SunshineStream/Sunshine.git
+  UPSTREAM_BRANCH: master
+  OPEN_VHF_BRANCH: open-vhf
+
+jobs:
+  plan:
+    if: github.repository == 'kirito12136/Sunshine' && github.ref == 'refs/heads/master'
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    outputs:
+      current: ${{ steps.merge.outputs.current }}
+      upstream: ${{ steps.merge.outputs.upstream }}
+      tree: ${{ steps.merge.outputs.tree }}
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          ref: open-vhf
+          fetch-depth: 0
+          persist-credentials: false
+      - name: Check for a clean upstream merge
+        id: merge
+        shell: bash
+        run: |
+          set -euo pipefail
+          git fetch --no-tags "$UPSTREAM_URL" "refs/heads/$UPSTREAM_BRANCH"
+          current=$(git rev-parse HEAD)
+          upstream=$(git rev-parse FETCH_HEAD)
+          if git merge-base --is-ancestor "$upstream" "$current"; then
+            echo "Open VHF already includes upstream $upstream." >> "$GITHUB_STEP_SUMMARY"
+            exit 0
+          fi
+          if ! merged=$(git merge-tree --write-tree "$current" "$upstream"); then
+            echo "$merged"
+            echo "::error::Upstream could not be merged automatically. Resolve the conflicts on open-vhf, then run this workflow again."
+            {
+              echo '### Open VHF was left at its current commit'
+              printf 'Upstream %s could not be merged into %s.\n' "$upstream" "$current"
+              echo
+              echo 'See the merge step log for details.'
+            } >> "$GITHUB_STEP_SUMMARY"
+            exit 1
+          fi
+          tree=${merged%%$'\n'*}
+          printf 'current=%s\nupstream=%s\ntree=%s\n' "$current" "$upstream" "$tree" >> "$GITHUB_OUTPUT"
+
+  build:
+    needs: plan
+    if: needs.plan.outputs.tree != ''
+    runs-on: windows-2022
+    timeout-minutes: 90
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          ref: ${{ needs.plan.outputs.current }}
+          fetch-depth: 0
+          persist-credentials: false
+      - name: Recreate the selected merge
+        shell: bash
+        env:
+          UPSTREAM_COMMIT: ${{ needs.plan.outputs.upstream }}
+          MERGE_TREE: ${{ needs.plan.outputs.tree }}
+        run: |
+          set -euo pipefail
+          git fetch --no-tags "$UPSTREAM_URL" "$UPSTREAM_COMMIT"
+          git -c user.name='github-actions[bot]' -c user.email='41898282+github-actions[bot]@users.noreply.github.com' \
+            merge --no-ff --no-commit "$UPSTREAM_COMMIT"
+          test "$(git write-tree)" = "$MERGE_TREE"
+          git submodule sync --recursive
+          git submodule update --init --recursive --jobs 6
+      - uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7.1.0
+        with:
+          node-version: '24'
+      - uses: msys2/setup-msys2@ec48f7c5447b3140e2b088413ae3a55687bccb6e # v2.33.0
+        with:
+          msystem: UCRT64
+          path-type: inherit
+          update: true
+          install: >-
+            git
+            mingw-w64-ucrt-x86_64-boost
+            mingw-w64-ucrt-x86_64-cmake
+            mingw-w64-ucrt-x86_64-cppwinrt
+            mingw-w64-ucrt-x86_64-curl-winssl
+            mingw-w64-ucrt-x86_64-MinHook
+            mingw-w64-ucrt-x86_64-miniupnpc
+            mingw-w64-ucrt-x86_64-ninja
+            mingw-w64-ucrt-x86_64-nlohmann-json
+            mingw-w64-ucrt-x86_64-nsis
+            mingw-w64-ucrt-x86_64-onevpl
+            mingw-w64-ucrt-x86_64-openssl
+            mingw-w64-ucrt-x86_64-opus
+            mingw-w64-ucrt-x86_64-pkgconf
+            mingw-w64-ucrt-x86_64-qt6-static
+            mingw-w64-ucrt-x86_64-toolchain
+      - name: Compile and test Windows x64
+        shell: msys2 {0}
+        run: |
+          set -euo pipefail
+          cmake -S . -B cmake-build-open-vhf -G Ninja \
+            -DCMAKE_BUILD_TYPE=Release -DBUILD_DOCS=OFF -DBUILD_TESTS=ON \
+            -DCUDA_FAIL_ON_MISSING=OFF -DSUNSHINE_ENABLE_WIX=OFF \
+            -DSUNSHINE_OPEN_VHF_SDK="$(cygpath -m "$PWD/third-party/libvirtualgamepad")"
+          cmake --build cmake-build-open-vhf --parallel 4
+          cmake-build-open-vhf/sunshine.exe --version
+          cmake-build-open-vhf/tests/test_sunshine.exe \
+            --gtest_filter='*GamepadRuntime*:*VigembusFallback*:*OpenVhf*' \
+            --gtest_fail_if_no_test_selected
+
+  publish:
+    needs: [plan, build]
+    if: needs.build.result == 'success'
+    permissions:
+      contents: write
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          ref: ${{ needs.plan.outputs.current }}
+          fetch-depth: 0
+      - name: Push the tested merge
+        shell: bash
+        env:
+          CURRENT_COMMIT: ${{ needs.plan.outputs.current }}
+          UPSTREAM_COMMIT: ${{ needs.plan.outputs.upstream }}
+          VERIFIED_TREE: ${{ needs.plan.outputs.tree }}
+        run: |
+          set -euo pipefail
+          target_ref="refs/heads/$OPEN_VHF_BRANCH"
+          remote=$(git ls-remote origin "$target_ref")
+          if [[ "${remote%%$'\t'*}" != "$CURRENT_COMMIT" ]]; then
+            echo "::error::open-vhf moved during testing. Run the workflow again for the new commit."
+            exit 1
+          fi
+          git fetch --no-tags "$UPSTREAM_URL" "$UPSTREAM_COMMIT"
+          merged=$(git merge-tree --write-tree "$CURRENT_COMMIT" "$UPSTREAM_COMMIT")
+          test "${merged%%$'\n'*}" = "$VERIFIED_TREE"
+          commit=$(git -c user.name='github-actions[bot]' \
+            -c user.email='41898282+github-actions[bot]@users.noreply.github.com' \
+            commit-tree "$VERIFIED_TREE" -p "$CURRENT_COMMIT" -p "$UPSTREAM_COMMIT" \
+            -m 'Merge upstream master into open-vhf')
+          git push origin "$commit:$target_ref"
+          echo "Pushed verified Open VHF merge $commit." >> "$GITHUB_STEP_SUMMARY"
