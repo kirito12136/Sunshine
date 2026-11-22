@@ -116,7 +116,11 @@ jobs:
             -DCUDA_FAIL_ON_MISSING=OFF -DSUNSHINE_ENABLE_WIX=OFF \
             -DSUNSHINE_OPEN_VHF_SDK="$(cygpath -m "$PWD/third-party/libvirtualgamepad")"
           cmake --build cmake-build-open-vhf --parallel 4
-          cmake-build-open-vhf/sunshine.exe --version
+          (
+            cd cmake-build-open-vhf
+            ./sunshine.exe --version 2>&1 | tee sunshine-version.log
+            grep -Fi 'Sunshine version:' sunshine-version.log
+          )
           cmake-build-open-vhf/tests/test_sunshine.exe \
             --gtest_filter='*GamepadRuntime*:*VigembusFallback*:*OpenVhf*' \
             --gtest_fail_if_no_test_selected
