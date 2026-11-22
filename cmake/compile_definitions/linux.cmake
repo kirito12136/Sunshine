@@ -73,6 +73,8 @@ if(CUDA_FOUND)
     include_directories(SYSTEM "${CMAKE_SOURCE_DIR}/third-party/nvfbc")
     list(APPEND PLATFORM_TARGET_FILES
             "${CMAKE_SOURCE_DIR}/src/platform/linux/cuda.h"
+            "${CMAKE_SOURCE_DIR}/src/platform/linux/cuda_color.h"
+            "${CMAKE_SOURCE_DIR}/src/platform/linux/cuda_gl_textures.h"
             "${CMAKE_SOURCE_DIR}/src/platform/linux/cuda.cu"
             "${CMAKE_SOURCE_DIR}/src/platform/linux/cuda.cpp"
             "${CMAKE_SOURCE_DIR}/third-party/nvfbc/NvFBC.h")
@@ -80,8 +82,10 @@ if(CUDA_FOUND)
     add_compile_definitions(SUNSHINE_BUILD_CUDA)
 endif()
 
-# libdrm is required for DRM (KMS). Only the headers are required for Wayland,
-# Vulkan, and PipeWire (KWin, Portal).
+# libdrm headers are required for DRM (KMS), Wayland, Vulkan, and PipeWire
+# (KWin, Portal). The library itself is linked for DRM (KMS) and for Wayland,
+# where capture queries the render node's PCI identity to choose between
+# zero-copy VRAM and the RAM bridge.
 if(${SUNSHINE_ENABLE_DRM} OR ${SUNSHINE_ENABLE_WAYLAND} OR ${SUNSHINE_ENABLE_VULKAN}
    OR ${SUNSHINE_ENABLE_KWIN} OR ${SUNSHINE_ENABLE_PORTAL})
     find_package(LIBDRM REQUIRED)
@@ -90,8 +94,10 @@ else()
 endif()
 if(LIBDRM_FOUND)
     include_directories(SYSTEM ${LIBDRM_INCLUDE_DIRS})
-    if(${SUNSHINE_ENABLE_DRM})
+    if(${SUNSHINE_ENABLE_DRM} OR ${SUNSHINE_ENABLE_WAYLAND})
         list(APPEND PLATFORM_LIBRARIES ${LIBDRM_LIBRARIES})
+    endif()
+    if(${SUNSHINE_ENABLE_DRM})
         add_compile_definitions(SUNSHINE_BUILD_DRM)
         list(APPEND PLATFORM_TARGET_FILES
                 "${CMAKE_SOURCE_DIR}/src/platform/linux/kmsgrab.cpp")
@@ -110,6 +116,10 @@ endif()
 include(dependencies/libevdev_Sunshine)
 
 # vaapi
+# FFmpeg's static archives need these compatibility symbols even when Sunshine's
+# VA-API encoder is disabled. The host's core and DRM libraries are always linked.
+include_directories(SYSTEM ${LIBVA_INCLUDE_DIR})
+list(APPEND PLATFORM_TARGET_FILES "${CMAKE_SOURCE_DIR}/src/platform/linux/vaapi_compat.cpp")
 if(${SUNSHINE_ENABLE_VAAPI})
     find_package(Libva REQUIRED)
 else()
@@ -126,16 +136,29 @@ endif()
 
 # vulkan video encoding (via FFmpeg)
 if(${SUNSHINE_ENABLE_VULKAN})
-    if(NOT SUNSHINE_SYSTEM_VULKAN_HEADERS)
-        # use Vulkan headers from build-deps submodule (system headers may be too old, e.g. Ubuntu 22.04)
-        set(VULKAN_HEADERS_DIR "${CMAKE_SOURCE_DIR}/third-party/build-deps/third-party/FFmpeg/Vulkan-Headers/include")
-    else()
+    if(SUNSHINE_SYSTEM_VULKAN_HEADERS)
         find_package(VulkanHeaders REQUIRED)
         get_target_property(VULKAN_HEADERS_DIR Vulkan::Headers INTERFACE_INCLUDE_DIRECTORIES)
+    elseif(EXISTS "${FFMPEG_PREPARED_BINARIES}/include/vulkan/vulkan.h")
+        set(VULKAN_HEADERS_DIR "${FFMPEG_INCLUDE_DIRS}")
+    else()
+        include("${CMAKE_MODULE_PATH}/dependencies/build_deps.cmake")
+        if(DEFINED CPM_DECLARATION_vulkan_headers)
+            # Keep the package declaration owned by build-deps.
+            set(SUNSHINE_CPM_PACKAGE_LOCK_ENABLED "${CPM_PACKAGE_LOCK_ENABLED}")
+            set(CPM_PACKAGE_LOCK_ENABLED OFF)
+            CPMAddPackage(NAME vulkan_headers DOWNLOAD_ONLY YES)
+            set(CPM_PACKAGE_LOCK_ENABLED "${SUNSHINE_CPM_PACKAGE_LOCK_ENABLED}")
+            unset(SUNSHINE_CPM_PACKAGE_LOCK_ENABLED)
+            set(VULKAN_HEADERS_DIR "${vulkan_headers_SOURCE_DIR}/include")
+        else()
+            # Older build-deps releases pin Vulkan Headers as a Git submodule.
+            set(VULKAN_HEADERS_DIR "${build_deps_SOURCE_DIR}/third-party/FFmpeg/Vulkan-Headers/include")
+        endif()
     endif()
 
     if(NOT EXISTS "${VULKAN_HEADERS_DIR}/vulkan/vulkan.h")
-        message(FATAL_ERROR "Vulkan headers not found in build-deps submodule")
+        message(FATAL_ERROR "Vulkan headers not found in ${VULKAN_HEADERS_DIR}")
     endif()
 
     find_library(VULKAN_LIBRARY NAMES vulkan vulkan-1)
@@ -207,7 +230,8 @@ if(WAYLAND_FOUND)
     add_compile_definitions(SUNSHINE_BUILD_WAYLAND)
 
     if(NOT SUNSHINE_SYSTEM_WAYLAND_PROTOCOLS)
-        set(WAYLAND_PROTOCOLS_DIR "${CMAKE_SOURCE_DIR}/third-party/wayland-protocols")
+        CPMAddPackage(NAME wayland_protocols DOWNLOAD_ONLY YES)
+        set(WAYLAND_PROTOCOLS_DIR "${wayland_protocols_SOURCE_DIR}")
     else()
         pkg_get_variable(WAYLAND_PROTOCOLS_DIR wayland-protocols pkgdatadir)
         pkg_check_modules(WAYLAND_PROTOCOLS wayland-protocols REQUIRED)
@@ -215,7 +239,8 @@ if(WAYLAND_FOUND)
 
     GEN_WAYLAND("${WAYLAND_PROTOCOLS_DIR}" "unstable/xdg-output" xdg-output-unstable-v1)
     GEN_WAYLAND("${WAYLAND_PROTOCOLS_DIR}" "unstable/linux-dmabuf" linux-dmabuf-unstable-v1)
-    GEN_WAYLAND("${CMAKE_SOURCE_DIR}/third-party/wlr-protocols" "unstable" wlr-screencopy-unstable-v1)
+    CPMAddPackage(NAME wlr_protocols DOWNLOAD_ONLY YES)
+    GEN_WAYLAND("${wlr_protocols_SOURCE_DIR}" "unstable" wlr-screencopy-unstable-v1)
 
     include_directories(
             SYSTEM
@@ -278,8 +303,9 @@ set(KWIN_FOUND OFF)
 if(PIPEWIRE_FOUND AND WAYLAND_FOUND AND ${SUNSHINE_ENABLE_KWIN})
     set(KWIN_FOUND ON)
     add_compile_definitions(SUNSHINE_BUILD_KWIN)
-    GEN_WAYLAND("${CMAKE_SOURCE_DIR}/third-party/plasma-wayland-protocols/src/protocols" "" kde-output-order-v1)
-    GEN_WAYLAND("${CMAKE_SOURCE_DIR}/third-party/plasma-wayland-protocols/src/protocols" "" zkde-screencast-unstable-v1)
+    CPMAddPackage(NAME plasma_wayland_protocols DOWNLOAD_ONLY YES)
+    GEN_WAYLAND("${plasma_wayland_protocols_SOURCE_DIR}/src/protocols" "" kde-output-order-v1)
+    GEN_WAYLAND("${plasma_wayland_protocols_SOURCE_DIR}/src/protocols" "" zkde-screencast-unstable-v1)
     list(APPEND PLATFORM_TARGET_FILES
             "${CMAKE_SOURCE_DIR}/src/platform/linux/kwingrab.cpp")
 elseif(${SUNSHINE_ENABLE_KWIN} AND NOT WAYLAND_FOUND)
