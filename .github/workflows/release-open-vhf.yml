@@ -1,0 +1,170 @@
+name: Release Open VHF for Windows
+
+on:
+  workflow_dispatch:
+    inputs:
+      version:
+        description: Release version (major.minor.patch)
+        required: true
+        type: string
+      source_sha:
+        description: Full commit SHA on open-vhf
+        required: true
+        type: string
+
+permissions:
+  contents: read
+
+concurrency:
+  group: release-open-vhf-${{ inputs.version }}
+  cancel-in-progress: false
+
+env:
+  RELEASE_VERSION: ${{ inputs.version }}
+  SOURCE_SHA: ${{ inputs.source_sha }}
+
+jobs:
+  build:
+    if: github.repository == 'kirito12136/Sunshine' && github.ref == 'refs/heads/master'
+    runs-on: windows-2022
+    timeout-minutes: 90
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          ref: ${{ inputs.source_sha }}
+          fetch-depth: 0
+          submodules: recursive
+          persist-credentials: false
+      - name: Verify the release source and version
+        shell: bash
+        run: |
+          set -euo pipefail
+          [[ "$RELEASE_VERSION" =~ ^(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)$ ]]
+          [[ "$SOURCE_SHA" =~ ^[0-9a-f]{40}$ ]]
+          test "$(git rev-parse HEAD)" = "$SOURCE_SHA"
+          git merge-base --is-ancestor "$SOURCE_SHA" origin/open-vhf
+      - uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7.1.0
+        with:
+          node-version: '24'
+      - uses: actions/setup-dotnet@0f4a354dd5547a28c70b7853dbd95d5b67886e73 # v6.1.0
+        with:
+          dotnet-version: '8.0.x'
+      - uses: msys2/setup-msys2@ec48f7c5447b3140e2b088413ae3a55687bccb6e # v2.33.0
+        with:
+          msystem: UCRT64
+          path-type: inherit
+          update: true
+          install: >-
+            git
+            mingw-w64-ucrt-x86_64-boost
+            mingw-w64-ucrt-x86_64-cmake
+            mingw-w64-ucrt-x86_64-cppwinrt
+            mingw-w64-ucrt-x86_64-curl-winssl
+            mingw-w64-ucrt-x86_64-harfbuzz
+            mingw-w64-ucrt-x86_64-libtiff
+            mingw-w64-ucrt-x86_64-MinHook
+            mingw-w64-ucrt-x86_64-miniupnpc
+            mingw-w64-ucrt-x86_64-ninja
+            mingw-w64-ucrt-x86_64-nlohmann-json
+            mingw-w64-ucrt-x86_64-nsis
+            mingw-w64-ucrt-x86_64-onevpl
+            mingw-w64-ucrt-x86_64-openssl
+            mingw-w64-ucrt-x86_64-opus
+            mingw-w64-ucrt-x86_64-pkgconf
+            mingw-w64-ucrt-x86_64-qt6-static
+            mingw-w64-ucrt-x86_64-toolchain
+      - name: Build, test, and package Windows x64
+        shell: msys2 {0}
+        env:
+          BRANCH: open-vhf
+          BUILD_VERSION: ${{ inputs.version }}
+          COMMIT: ${{ inputs.source_sha }}
+          TAG: v${{ inputs.version }}
+          DOTNET_ROLL_FORWARD: Major
+        run: |
+          set -euo pipefail
+          cmake -S . -B cmake-build-open-vhf -G Ninja \
+            -DCMAKE_BUILD_TYPE=Release -DBUILD_DOCS=OFF -DBUILD_TESTS=ON \
+            -DCUDA_FAIL_ON_MISSING=OFF -DSUNSHINE_ENABLE_WIX=ON \
+            -DSUNSHINE_PUBLISHER_NAME=kirito12136 \
+            -DSUNSHINE_OPEN_VHF_SDK="$(cygpath -m "$PWD/third-party/libvirtualgamepad")"
+          cmake --build cmake-build-open-vhf --parallel 4
+
+          cmake-build-open-vhf/tests/test_sunshine.exe \
+            --gtest_filter='*GamepadRuntime*:*VigembusFallback*:*OpenVhf*' \
+            --gtest_color=no --gtest_brief=0 2>&1 | tee open-vhf-tests.log
+          if ! grep -Eq '^\[  PASSED  \] [1-9][0-9]* tests?\.' open-vhf-tests.log; then
+            echo '::error::No selected Open VHF tests passed.'
+            exit 1
+          fi
+
+          mkdir -p release-assets
+          package_name="Sunshine-Open-VHF-$RELEASE_VERSION-Windows-x64"
+          (
+            cd cmake-build-open-vhf
+            cpack -G WIX
+            cpack -G ZIP
+            mv cpack_artifacts/Sunshine.msi "../release-assets/$package_name.msi"
+            mv cpack_artifacts/Sunshine.zip "../release-assets/$package_name.zip"
+          )
+      - name: Verify the packaged Windows executable
+        shell: pwsh
+        run: |
+          $package = "release-assets/Sunshine-Open-VHF-$env:RELEASE_VERSION-Windows-x64.zip"
+          Expand-Archive -LiteralPath $package -DestinationPath release-smoke-test
+          $binaries = @(Get-ChildItem -Path release-smoke-test -Filter sunshine.exe -File -Recurse)
+          if ($binaries.Count -ne 1) {
+            throw 'The portable package must contain one sunshine.exe.'
+          }
+          Push-Location $binaries[0].DirectoryName
+          try {
+            $env:Path = "$env:SystemRoot\System32;$env:SystemRoot"
+            $output = & $binaries[0].FullName --version 2>&1 | Out-String
+            Write-Output $output
+            $expected = [regex]::Escape($env:RELEASE_VERSION)
+            if ($LASTEXITCODE -ne 0 -or $output -notmatch "Sunshine version: $expected(\s|$)") {
+              throw 'The packaged executable did not report the release version.'
+            }
+          } finally {
+            Pop-Location
+          }
+      - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: open-vhf-windows-x64
+          path: release-assets/
+          if-no-files-found: error
+          compression-level: 0
+
+  publish:
+    needs: build
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
+        with:
+          name: open-vhf-windows-x64
+          path: release-assets
+      - name: Publish the GitHub release
+        shell: bash
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          cd release-assets
+          package_name="Sunshine-Open-VHF-$RELEASE_VERSION-Windows-x64"
+          sha256sum "$package_name.msi" "$package_name.zip" > SHA256SUMS.txt
+          cat > release-notes.md <<'NOTES'
+          Windows x64 build of the Sunshine Open VHF fork.
+
+          - **MSI:** Windows installer.
+          - **ZIP:** portable distribution.
+          - **SHA256SUMS.txt:** SHA-256 checksums for both downloads.
+
+          These are unsigned fork builds. Install the compatible [libvirtualgamepad Windows VHF driver](https://github.com/Nonary/libvirtualgamepad) separately to use the Open VHF backend.
+          NOTES
+          gh release create "v$RELEASE_VERSION" \
+            --repo "$GITHUB_REPOSITORY" --target "$SOURCE_SHA" --title "$RELEASE_VERSION" \
+            --notes-file release-notes.md --latest \
+            "$package_name.msi" "$package_name.zip" SHA256SUMS.txt
