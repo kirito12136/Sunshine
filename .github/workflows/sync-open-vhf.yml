@@ -125,20 +125,35 @@ jobs:
           )
           cmake-build-open-vhf/tests/test_sunshine.exe \
             --gtest_filter='*GamepadRuntime*:*VigembusFallback*:*OpenVhf*' \
-            --gtest_fail_if_no_test_selected
+            --gtest_color=no --gtest_brief=0 2>&1 | tee open-vhf-tests.log
+
+          if ! grep -Eq '^\[  PASSED  \] [1-9][0-9]* tests?\.' open-vhf-tests.log; then
+            echo '::error::No selected Open VHF tests passed.'
+            exit 1
+          fi
 
   publish:
     needs: [plan, build]
     if: needs.build.result == 'success'
-    permissions:
-      contents: write
+    environment: open-vhf-publish
     runs-on: ubuntu-latest
     timeout-minutes: 10
     steps:
+      - name: Check publish credential
+        shell: bash
+        env:
+          OPEN_VHF_SYNC_TOKEN: ${{ secrets.OPEN_VHF_SYNC_TOKEN }}
+        run: |
+          if [[ -z "$OPEN_VHF_SYNC_TOKEN" ]]; then
+            echo '::error::Set OPEN_VHF_SYNC_TOKEN in the open-vhf-publish environment.'
+            exit 1
+          fi
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           ref: ${{ needs.plan.outputs.current }}
           fetch-depth: 0
+          token: ${{ secrets.OPEN_VHF_SYNC_TOKEN }}
+          persist-credentials: true
       - name: Push the tested merge
         shell: bash
         env:
