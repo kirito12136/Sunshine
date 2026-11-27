@@ -10,6 +10,13 @@
 
 ## Open VHF fork
 
+[English](README.md) · [简体中文](README.zh-CN.md)
+
+> [!IMPORTANT]
+> **[`open-vhf`](https://github.com/kirito12136/Sunshine/tree/open-vhf) is a separately maintained feature branch of this fork.**
+> The fork's default branch is [`master`](https://github.com/kirito12136/Sunshine/tree/master).
+> The upstream main branch is [`SunshineStream/Sunshine:master`](https://github.com/SunshineStream/Sunshine/tree/master).
+
 The [`open-vhf` branch](https://github.com/kirito12136/Sunshine/tree/open-vhf) adds [libvirtualgamepad](https://github.com/Nonary/libvirtualgamepad)
 as a Windows virtual gamepad backend for Sunshine. It can be used without a Virtual HID Broker license
 once a compatible Windows Open VHF driver is installed.
