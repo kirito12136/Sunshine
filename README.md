@@ -8,6 +8,44 @@
   <h4 align="center">Self-hosted game stream host for Moonlight.</h4>
 </div>
 
+## Open VHF fork
+
+The [`open-vhf` branch](https://github.com/kirito12136/Sunshine/tree/open-vhf) adds [libvirtualgamepad](https://github.com/Nonary/libvirtualgamepad)
+as a Windows virtual gamepad backend for Sunshine. It can be used without a Virtual HID Broker license
+once a compatible Windows Open VHF driver is installed.
+
+[Download the fork for Windows x64](https://github.com/kirito12136/Sunshine/releases/latest) ·
+[Compare with upstream `master`](https://github.com/SunshineStream/Sunshine/compare/master...kirito12136:open-vhf)
+
+### What changed
+
+| Area | Upstream Sunshine on Windows | This fork on Windows |
+| --- | --- | --- |
+| Gamepad drivers | Licensed Virtual HID Broker and the ViGEmBus fallback for Xbox 360 and DualShock 4. | Adds **Open VHF (libvirtualgamepad)** alongside the existing choices. |
+| **All Available Drivers** | Prefers the licensed Virtual HID Broker when available and allows ViGEmBus where applicable. | Tries Open VHF first, then the existing Virtual HID Broker and ViGEmBus paths where applicable. |
+| **Open VHF (libvirtualgamepad)** | — | Uses Open VHF exclusively. If the driver or requested profile is unavailable, Sunshine does not fall back to another gamepad backend. |
+
+- Open VHF supports Xbox One, Xbox Series, DualShock 4, DualSense, and Nintendo Switch Pro emulation,
+  depending on the profiles exposed by the installed driver. Motion, touchpad input, rumble, and other
+  feedback depend on the selected profile and Moonlight client.
+- The web UI adds the driver choice under **Configuration → Input** and shows Open VHF guidance when
+  the selected backend is unavailable.
+- Windows builds include the [libvirtualgamepad client SDK](third-party/libvirtualgamepad/README.md) by
+  default. The fork's [`master` branch](https://github.com/kirito12136/Sunshine/tree/master) hosts the
+  [sync workflow](https://github.com/kirito12136/Sunshine/actions/workflows/sync-open-vhf.yml), which
+  builds and tests Windows x64 merges before updating `open-vhf`.
+
+### Windows setup
+
+1. Install the MSI or extract the portable ZIP from the [fork's Releases](https://github.com/kirito12136/Sunshine/releases).
+2. Install a compatible, signed libvirtualgamepad driver separately on the Windows host. See the [driver project's packaging and signing documentation](https://github.com/Nonary/libvirtualgamepad#driver-package-and-signing).
+3. In Sunshine's web UI, open **Configuration → Input** and choose **Open VHF (libvirtualgamepad)**
+   as the **Gamepad Backend**. Select **All Available Drivers** if you want to keep the other backends
+   available as fallbacks.
+
+The fork's published packages cover Windows x64. For Linux, macOS, and other platforms, see the
+[upstream Sunshine releases](https://github.com/SunshineStream/Sunshine/releases/latest).
+
 <div align="center">
   <!-- Keep whitespace outside the badge links to avoid an underlined gap. -->
   <!-- Use raw HTML aliases to keep Doxygen's emitted comment delimiters balanced. -->
@@ -132,7 +170,7 @@ LizardByte has the full documentation hosted on [Read the Docs](https://docs.liz
 > [!NOTE]
 > <sup>1</sup> Missing motion, touchpad input, battery state, RGB LEDs, adaptive triggers, and raw HID output reports.
 > <sup>2</sup> Requires the separately installed and licensed Virtual HID Broker.
-> <sup>3</sup> All profiles are available through the separately installed and licensed Virtual HID Broker. Xbox 360 and DualShock 4 can also use ViGEmBus.
+> <sup>3</sup> The separately installed and licensed Virtual HID Broker provides all Windows profiles in this table. Xbox 360 and DualShock 4 can also use ViGEmBus. See the [Open VHF fork](#open-vhf-fork) for the additional Windows backend and its profiles.
 
 <table>
     <caption id="encoding_api">Encoding API</caption>
