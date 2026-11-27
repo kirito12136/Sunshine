@@ -217,7 +217,9 @@ jobs:
           binary="$app/Contents/MacOS/sunshine"
           codesign --verify --deep --strict "$app"
           lipo "$binary" -verify_arch "$MATRIX_ARCH"
-          "$binary" --version | grep -Fx "Sunshine version: $BUILD_VERSION"
+          version_output=$("$binary" --version 2>&1)
+          printf '%s\n' "$version_output"
+          grep -F -- "Sunshine version: $BUILD_VERSION commit: $COMMIT" <<< "$version_output"
 
       - name: Submit for notarization
         id: notarize_submit
