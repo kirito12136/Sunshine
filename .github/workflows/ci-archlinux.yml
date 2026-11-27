@@ -5,6 +5,11 @@ permissions: {}
 on:
   workflow_call:
     inputs:
+      release_source_ref:
+        description: Check out the exact fork release source when supplied.
+        default: ''
+        required: false
+        type: string
       release_commit:
         required: true
         type: string
@@ -19,8 +24,9 @@ jobs:
       _use_cuda: true
       _run_unit_tests: true
       _support_headless_testing: true
-      BRANCH: ${{ github.head_ref || github.ref_name }}
+      BRANCH: ${{ inputs.release_source_ref != '' && 'open-vhf' || github.head_ref || github.ref_name }}
       BUILD_VERSION: ${{ inputs.release_version }}
+      FORK_RELEASE: ${{ inputs.release_source_ref != '' }}
       CLONE_URL: >-
         ${{
           github.event_name == 'pull_request' &&
@@ -72,6 +78,8 @@ jobs:
 
       - name: Checkout
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
+        with:
+          ref: ${{ inputs.release_source_ref }}
 
       - name: Fix workspace permissions
         shell: bash
@@ -84,7 +92,7 @@ jobs:
         run: |
           # Calculate sub_version
           sub_version=""
-          if [[ "${BRANCH}" != "master" ]]; then
+          if [[ "${BRANCH}" != "master" && "${FORK_RELEASE}" != "true" ]]; then
             sub_version=".r${COMMIT}"
           fi
 

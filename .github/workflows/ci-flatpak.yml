@@ -5,6 +5,11 @@ permissions: {}
 on:
   workflow_call:
     inputs:
+      release_source_ref:
+        description: Check out the exact fork release source when supplied.
+        default: ''
+        required: false
+        type: string
       release_commit:
         required: true
         type: string
@@ -44,6 +49,7 @@ jobs:
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
         with:
           submodules: recursive
+          ref: ${{ inputs.release_source_ref }}
 
       - name: Setup python
         id: python
@@ -182,6 +188,7 @@ jobs:
         env:
           INPUT_RELEASE_VERSION: ${{ inputs.release_version }}
           INPUT_RELEASE_COMMIT: ${{ inputs.release_commit }}
+          INPUT_RELEASE_SOURCE_REF: ${{ inputs.release_source_ref }}
           PR_CLONE_URL: ${{ github.event.pull_request.head.repo.clone_url }}
           PR_HEAD_REF: ${{ github.event.pull_request.head.ref }}
           PR_HEAD_SHA: ${{ github.event.pull_request.head.sha }}
@@ -193,7 +200,9 @@ jobs:
           commit="${INPUT_RELEASE_COMMIT}"
           clone_url="${REPOSITORY_CLONE_URL}"
 
-          if [ "${GITHUB_EVENT_NAME}" == "push" ]; then
+          if [ -n "${INPUT_RELEASE_SOURCE_REF}" ]; then
+            branch="open-vhf"
+          elif [ "${GITHUB_EVENT_NAME}" == "push" ]; then
             echo "This is a PUSH event"
             branch="${GITHUB_REF_NAME}"
           elif [ "${GITHUB_EVENT_NAME}" == "pull_request" ]; then

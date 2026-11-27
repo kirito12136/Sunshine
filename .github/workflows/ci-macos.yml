@@ -5,6 +5,11 @@ permissions: {}
 on:
   workflow_call:
     inputs:
+      release_source_ref:
+        description: Check out the exact fork release source when supplied.
+        default: ''
+        required: false
+        type: string
       publish_release:
         required: true
         type: string
@@ -36,7 +41,7 @@ on:
         required: false
 
 env:
-  BRANCH: ${{ github.head_ref || github.ref_name }}
+  BRANCH: ${{ inputs.release_source_ref != '' && 'open-vhf' || github.head_ref || github.ref_name }}
   BUILD_VERSION: ${{ inputs.release_version }}
   COMMIT: ${{ inputs.release_commit }}
   MACOSX_DEPLOYMENT_TARGET: '15.0'  # Match the minimum version required by the prebuilt macOS dependencies.
@@ -75,6 +80,7 @@ jobs:
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
         with:
           submodules: recursive
+          ref: ${{ inputs.release_source_ref }}
 
       - name: Install dependencies
         timeout-minutes: 5
@@ -154,13 +160,40 @@ jobs:
           APPLE_CODESIGN_IDENTITY: ${{ secrets.APPLE_CODESIGN_IDENTITY }}
           MATRIX_NAME: ${{ matrix.name }}
           SHOULD_SIGN: ${{ inputs.publish_release }}
+          FORK_RELEASE: ${{ inputs.release_source_ref != '' }}
         run: |
-          # build DMG and sign everything (see cmake/packaging/macos.cmake)
-          # cpack can rarely fail with "hdiutil: create failed - Resource busy"
-          # so let's allow 1 retry
-          if ! cpack -G DragNDrop --config build/CPackConfig.cmake; then
+          cpack_args=(-G DragNDrop --config build/CPackConfig.cmake)
+          if [[ "$FORK_RELEASE" == true && "$SHOULD_SIGN" != true ]]; then
+            signing_script="$RUNNER_TEMP/open-vhf-sign-dmg.cmake"
+            cat > "$signing_script" <<'CMAKE'
+          file(GLOB apps "${CPACK_TEMPORARY_DIRECTORY}/Sunshine.app" "${CPACK_TEMPORARY_DIRECTORY}/*/Sunshine.app")
+          list(LENGTH apps app_count)
+          if(NOT app_count EQUAL 1)
+            message(FATAL_ERROR "Expected exactly one Sunshine.app in the disk image staging directory")
+          endif()
+          list(GET apps 0 app)
+          file(GLOB_RECURSE libraries "${app}/Contents/Frameworks/*.dylib" "${app}/Contents/PlugIns/*.dylib")
+          file(GLOB frameworks "${app}/Contents/Frameworks/*.framework")
+          execute_process(COMMAND /usr/bin/xattr -cr "${app}" COMMAND_ERROR_IS_FATAL ANY)
+          foreach(item IN LISTS libraries frameworks)
+            execute_process(
+              COMMAND /usr/bin/codesign --force --sign - --timestamp=none "${item}"
+              COMMAND_ERROR_IS_FATAL ANY)
+          endforeach()
+          execute_process(
+            COMMAND /usr/bin/codesign --force --sign - --timestamp=none "${app}"
+            COMMAND_ERROR_IS_FATAL ANY)
+          execute_process(
+            COMMAND /usr/bin/codesign --verify --deep --strict "${app}"
+            COMMAND_ERROR_IS_FATAL ANY)
+          CMAKE
+            cpack_args+=(-D "CPACK_PRE_BUILD_SCRIPTS=$signing_script")
+          fi
+
+          # Retry once if hdiutil reports that the image device is busy.
+          if ! cpack "${cpack_args[@]}"; then
             echo "cpack failed, retrying once with verbose..."
-            if ! cpack -G DragNDrop --config build/CPackConfig.cmake --verbose; then
+            if ! cpack "${cpack_args[@]}" --verbose; then
               echo "cpack failed again. Aborting."
               exit 1
             fi
@@ -168,6 +201,23 @@ jobs:
 
           mkdir -p artifacts
           cp "build/cpack_artifacts/Sunshine.dmg" "artifacts/Sunshine-${MATRIX_NAME}.dmg"
+
+      - name: Verify the fork DMG
+        if: inputs.release_source_ref != ''
+        env:
+          MATRIX_ARCH: ${{ matrix.arch }}
+          MATRIX_NAME: ${{ matrix.name }}
+        run: |
+          set -euo pipefail
+          mount_point="$RUNNER_TEMP/open-vhf-dmg"
+          mkdir -p "$mount_point"
+          hdiutil attach -nobrowse -readonly -mountpoint "$mount_point" "artifacts/Sunshine-$MATRIX_NAME.dmg"
+          trap 'hdiutil detach "$mount_point"' EXIT
+          app="$mount_point/Sunshine.app"
+          binary="$app/Contents/MacOS/sunshine"
+          codesign --verify --deep --strict "$app"
+          lipo -verify_arch "$MATRIX_ARCH" "$binary"
+          "$binary" --version | grep -Fx "Sunshine version: $BUILD_VERSION"
 
       - name: Submit for notarization
         id: notarize_submit

@@ -5,6 +5,11 @@ permissions: {}
 on:
   workflow_call:
     inputs:
+      release_source_ref:
+        description: Check out the exact fork release source when supplied.
+        default: ''
+        required: false
+        type: string
       release_commit:
         required: true
         type: string
@@ -13,7 +18,7 @@ on:
         type: string
 
 env:
-  BRANCH: ${{ github.head_ref || github.ref_name }}
+  BRANCH: ${{ inputs.release_source_ref != '' && 'open-vhf' || github.head_ref || github.ref_name }}
   BUILD_VERSION: ${{ inputs.release_version }}
   PYTHON_VERSION: '3.14'
   COMMIT: ${{ inputs.release_commit }}
@@ -38,6 +43,7 @@ jobs:
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
         with:
           submodules: recursive
+          ref: ${{ inputs.release_source_ref }}
 
       - name: Get Processor Count
         id: processor_count

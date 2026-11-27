@@ -1,0 +1,286 @@
+---
+name: Build Open VHF release platforms
+permissions: {}
+
+on:
+  workflow_call:
+    inputs:
+      version:
+        required: true
+        type: string
+      source_sha:
+        required: true
+        type: string
+
+jobs:
+  linux:
+    name: Linux AppImage
+    permissions:
+      contents: read
+    uses: ./.github/workflows/ci-linux.yml
+    with:
+      release_commit: ${{ inputs.source_sha }}
+      release_source_ref: ${{ inputs.source_sha }}
+      release_version: ${{ inputs.version }}
+
+  macos:
+    name: macOS DMG
+    permissions:
+      contents: read
+    uses: ./.github/workflows/ci-macos.yml
+    with:
+      release_commit: ${{ inputs.source_sha }}
+      release_source_ref: ${{ inputs.source_sha }}
+      release_version: ${{ inputs.version }}
+      publish_release: 'false'
+
+  windows:
+    name: Windows ARM64
+    permissions:
+      contents: read
+    uses: ./.github/workflows/ci-windows.yml
+    with:
+      release_commit: ${{ inputs.source_sha }}
+      release_source_ref: ${{ inputs.source_sha }}
+      release_version: ${{ inputs.version }}
+      publish_release: 'false'
+      arm64_only: true
+
+  freebsd:
+    name: FreeBSD
+    permissions:
+      contents: read
+    uses: ./.github/workflows/ci-freebsd.yml
+    with:
+      release_commit: ${{ inputs.source_sha }}
+      release_source_ref: ${{ inputs.source_sha }}
+      release_version: ${{ inputs.version }}
+
+  alpine:
+    name: Alpine
+    permissions:
+      contents: read
+    uses: ./.github/workflows/ci-alpine.yml
+    with:
+      release_commit: ${{ inputs.source_sha }}
+      release_source_ref: ${{ inputs.source_sha }}
+      release_version: ${{ inputs.version }}
+
+  archlinux:
+    name: Arch Linux
+    permissions:
+      contents: read
+    uses: ./.github/workflows/ci-archlinux.yml
+    with:
+      release_commit: ${{ inputs.source_sha }}
+      release_source_ref: ${{ inputs.source_sha }}
+      release_version: ${{ inputs.version }}
+
+  flatpak:
+    name: Linux Flatpak
+    permissions:
+      contents: read
+    uses: ./.github/workflows/ci-flatpak.yml
+    with:
+      release_commit: ${{ inputs.source_sha }}
+      release_source_ref: ${{ inputs.source_sha }}
+      release_version: ${{ inputs.version }}
+
+  deb:
+    name: DEB ${{ matrix.target }} ${{ matrix.arch }}
+    runs-on: ${{ matrix.runner }}
+    timeout-minutes: 120
+    permissions:
+      contents: read
+    strategy:
+      fail-fast: false
+      matrix:
+        target: [debian-trixie, ubuntu-22-04, ubuntu-24-04, ubuntu-26-04, ubuntu-26-10]
+        arch: [amd64, arm64]
+        include:
+          - arch: amd64
+            runner: ubuntu-latest
+            platform: linux/amd64
+          - arch: arm64
+            runner: ubuntu-24.04-arm
+            platform: linux/arm64/v8
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          ref: ${{ inputs.source_sha }}
+          submodules: recursive
+          persist-credentials: false
+      - uses: LizardByte/actions/actions/more_space@81873587bacc6842098865a35bbb32f2f21cee3b
+        with:
+          clean-all: true
+          safe-packages: docker
+      - uses: docker/setup-buildx-action@f87e5991a6d7451dcb8d9637bfbc97413f497069 # v4.4.1
+      - name: Build and test the native distribution package
+        shell: bash
+        env:
+          TARGET: ${{ matrix.target }}
+          PLATFORM: ${{ matrix.platform }}
+          EXPECTED_ARCH: ${{ matrix.arch }}
+          RELEASE_VERSION: ${{ inputs.version }}
+          SOURCE_SHA: ${{ inputs.source_sha }}
+        run: |
+          set -euo pipefail
+          docker buildx bake "$TARGET" \
+            --set "$TARGET.platform=$PLATFORM" \
+            --set "$TARGET.args.BRANCH=open-vhf" \
+            --set "$TARGET.args.BUILD_VERSION=$RELEASE_VERSION" \
+            --set "$TARGET.args.COMMIT=$SOURCE_SHA" \
+            --set "$TARGET.output=type=local,dest=$RUNNER_TEMP/deb-out"
+
+          shopt -s nullglob
+          packages=("$RUNNER_TEMP/deb-out/artifacts/"*.deb)
+          if (( ${#packages[@]} != 1 )); then
+            echo "::error::Expected one DEB for $TARGET ($EXPECTED_ARCH)."
+            exit 1
+          fi
+          package="${packages[0]}"
+          test "$(dpkg-deb --field "$package" Architecture)" = "$EXPECTED_ARCH"
+          case "$(dpkg-deb --field "$package" Version)" in
+            "$RELEASE_VERSION"-*) ;;
+            *) echo "::error::The DEB did not report version $RELEASE_VERSION." ; exit 1 ;;
+          esac
+          mkdir -p artifacts
+          cp "$package" artifacts/
+      - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: build-DEB-${{ matrix.target }}-${{ matrix.arch }}
+          path: artifacts/
+          if-no-files-found: error
+
+  rpm:
+    name: RPM ${{ matrix.distro }} ${{ matrix.arch }}
+    runs-on: ${{ matrix.runner }}
+    timeout-minutes: 120
+    permissions:
+      contents: read
+    strategy:
+      fail-fast: false
+      matrix:
+        distro: [fedora-43, fedora-44, fedora-45, fedora-46, opensuse-leap-16, opensuse-tumbleweed]
+        arch: [x86_64, aarch64]
+        include:
+          - arch: x86_64
+            runner: ubuntu-latest
+          - arch: aarch64
+            runner: ubuntu-24.04-arm
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          ref: ${{ inputs.source_sha }}
+          submodules: recursive
+          persist-credentials: false
+      - uses: LizardByte/actions/actions/more_space@81873587bacc6842098865a35bbb32f2f21cee3b
+        with:
+          clean-all: true
+          safe-packages: docker
+      - name: Build and test the native RPM from the upstream spec
+        shell: bash
+        env:
+          DISTRO: ${{ matrix.distro }}
+          EXPECTED_ARCH: ${{ matrix.arch }}
+          RELEASE_VERSION: ${{ inputs.version }}
+          SOURCE_SHA: ${{ inputs.source_sha }}
+        run: |
+          set -euo pipefail
+          case "$DISTRO" in
+            fedora-*)
+              fedora_version="${DISTRO#fedora-}"
+              image="fedora:$fedora_version"
+              dist=".fc$fedora_version"
+              if [[ "$fedora_version" == 46 ]] && ! docker manifest inspect "$image" >/dev/null 2>&1; then
+                image=fedora:rawhide
+              fi
+              ;;
+            opensuse-leap-16) image=opensuse/leap:16.0; dist=.suse.lp160 ;;
+            opensuse-tumbleweed) image=opensuse/tumbleweed:latest; dist=.suse.tw ;;
+            *) exit 1 ;;
+          esac
+
+          mkdir -p artifacts
+          docker run --rm -i \
+            --mount "type=bind,src=$PWD,dst=/source,readonly" \
+            --mount "type=bind,src=$PWD/artifacts,dst=/out" \
+            --env RELEASE_VERSION --env SOURCE_SHA --env EXPECTED_ARCH \
+            --env "RPM_DIST=$dist" --env "FEDORA_VERSION=${fedora_version:-}" \
+            "$image" bash -s <<'RPM_BUILD'
+          set -euo pipefail
+          test "$(uname -m)" = "$EXPECTED_ARCH"
+          if [[ -n "$FEDORA_VERSION" ]]; then
+            dnf -y install rpm-build git-core tar gzip shadow-utils
+            test "$(rpm --eval '%{fedora}')" = "$FEDORA_VERSION"
+          else
+            zypper --non-interactive refresh
+            zypper --non-interactive install rpm-build git tar gzip shadow
+          fi
+
+          topdir=/tmp/sunshine-rpmbuild
+          mkdir -p "$topdir"/{BUILD,RPMS,SOURCES,SPECS,SRPMS}
+          spec="$topdir/SPECS/Sunshine.spec"
+          sed -e "s/^%global build_version 0$/%global build_version $RELEASE_VERSION/" \
+            -e "s/^%global branch 0$/%global branch open-vhf/" \
+            -e "s/^%global commit 0$/%global commit $SOURCE_SHA/" \
+            /source/packaging/linux/copr/Sunshine.spec > "$spec"
+
+          if [[ -n "$FEDORA_VERSION" ]]; then
+            dnf -y builddep "$spec"
+          else
+            mapfile -t requirements < <(rpmspec -q --buildrequires "$spec" | sed 's/ //g')
+            test "${#requirements[@]}" -gt 0
+            zypper --non-interactive install "${requirements[@]}"
+          fi
+
+          tar -C /source --exclude-vcs --exclude='./artifacts' -czf "$topdir/SOURCES/tarball.tar.gz" .
+          useradd -m builder
+          chown -R builder "$topdir"
+          runuser -u builder -- rpmbuild \
+            --define "_topdir $topdir" --define "dist $RPM_DIST" -bb "$spec"
+
+          filename="Sunshine-$RELEASE_VERSION-1$RPM_DIST.$EXPECTED_ARCH.rpm"
+          package="$topdir/RPMS/$EXPECTED_ARCH/$filename"
+          test "$(rpm -qp --queryformat '%{NAME}:%{VERSION}:%{ARCH}' "$package")" \
+            = "Sunshine:$RELEASE_VERSION:$EXPECTED_ARCH"
+          install -m 0644 "$package" /out/
+          RPM_BUILD
+      - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: build-RPM-${{ matrix.distro }}-${{ matrix.arch }}
+          path: artifacts/
+          if-no-files-found: error
+
+  homebrew:
+    name: Homebrew formula
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          ref: ${{ inputs.source_sha }}
+          persist-credentials: false
+      - name: Generate and validate the formula for the fork tag
+        shell: bash
+        env:
+          BRANCH: open-vhf
+          BUILD_VERSION: ${{ inputs.version }}
+          CLONE_URL: ${{ github.event.repository.clone_url }}
+          COMMIT: ${{ inputs.source_sha }}
+          TAG: v${{ inputs.version }}
+        run: |
+          set -euo pipefail
+          cmake -B build -S . \
+            -DGITHUB_DEFAULT_BRANCH=open-vhf \
+            -DSUNSHINE_CONFIGURE_HOMEBREW=ON \
+            -DSUNSHINE_CONFIGURE_ONLY=ON
+          ruby -c build/sunshine.rb
+          grep -Fq "$CLONE_URL" build/sunshine.rb
+          grep -Fq "$COMMIT" build/sunshine.rb
+      - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: build-Homebrew-formula
+          path: build/sunshine.rb
+          if-no-files-found: error

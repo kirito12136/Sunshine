@@ -5,6 +5,11 @@ on:
     - cron: '0 2 * * 6' # Saturday at 10:00 Asia/Shanghai
   workflow_dispatch:
     inputs:
+      verify_only:
+        description: Compile and validate packages without publishing a release
+        required: false
+        default: false
+        type: boolean
       version:
         description: Release version (major.minor.patch)
         required: true
@@ -23,7 +28,10 @@ concurrency:
 
 jobs:
   plan:
-    if: github.repository == 'kirito12136/Sunshine' && github.ref == 'refs/heads/master'
+    if: >-
+      github.repository == 'kirito12136/Sunshine' &&
+      (github.ref == 'refs/heads/master' ||
+      (github.event_name == 'workflow_dispatch' && inputs.verify_only))
     runs-on: ubuntu-latest
     timeout-minutes: 10
     permissions:
@@ -209,42 +217,104 @@ jobs:
           }
       - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
         with:
-          name: open-vhf-windows-x64
+          name: build-open-vhf-windows-x64
           path: release-assets/
           if-no-files-found: error
           compression-level: 0
 
+  platforms:
+    needs: plan
+    if: needs.plan.outputs.source_sha != ''
+    permissions:
+      contents: read
+    uses: ./.github/workflows/release-open-vhf-platforms.yml
+    with:
+      source_sha: ${{ needs.plan.outputs.source_sha }}
+      version: ${{ needs.plan.outputs.version }}
+
   publish:
-    needs: [plan, build]
+    needs: [plan, build, platforms]
     env:
       RELEASE_VERSION: ${{ needs.plan.outputs.version }}
       SOURCE_SHA: ${{ needs.plan.outputs.source_sha }}
     runs-on: ubuntu-latest
-    timeout-minutes: 10
+    timeout-minutes: 20
     permissions:
       contents: write
     steps:
       - uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
         with:
-          name: open-vhf-windows-x64
-          path: release-assets
+          pattern: build-*
+          path: downloaded-packages
+      - name: Verify platform coverage and generate SHA-256 checksums
+        shell: bash
+        run: |
+          set -euo pipefail
+          mkdir release-assets
+          while IFS= read -r -d '' package; do
+            filename="${package##*/}"
+            if [[ ! "$filename" =~ ^[a-zA-Z0-9._+-]+$ || -e "release-assets/$filename" ]]; then
+              echo "::error::Invalid or duplicate release filename: $filename"
+              exit 1
+            fi
+            cp -- "$package" "release-assets/$filename"
+          done < <(find downloaded-packages -type f -print0)
+
+          cd release-assets
+          shopt -s nullglob
+          require_count() {
+            local expected="$1"
+            local description="$2"
+            shift 2
+            if (( $# != expected )); then
+              echo "::error::Expected $expected $description packages, found $#."
+              exit 1
+            fi
+          }
+
+          package_name="Sunshine-Open-VHF-$RELEASE_VERSION-Windows-x64"
+          require_count 1 "Windows x64 MSI" "$package_name".msi*
+          require_count 1 "Windows x64 ZIP" "$package_name".zip*
+          require_count 1 "Windows ARM64 MSI" Sunshine-Windows-ARM64-*.msi
+          require_count 1 "Windows ARM64 ZIP" Sunshine-Windows-ARM64-*.zip
+          require_count 1 "macOS Apple Silicon" Sunshine-macOS-arm64.dmg*
+          require_count 1 "macOS Intel" Sunshine-macOS-x86_64.dmg*
+          require_count 2 "Linux AppImage" *.AppImage
+          require_count 10 "Debian and Ubuntu" *.deb
+          require_count 8 "Fedora" *.fc*.rpm
+          require_count 4 "openSUSE" *.suse.*.rpm
+          require_count 1 "Arch Linux" *.pkg.tar.zst
+          require_count 2 "Alpine" *.apk
+          require_count 4 "Flatpak" *.flatpak
+          require_count 1 "FreeBSD" Sunshine-FreeBSD-*.pkg
+          test -s sunshine.rb
+          test -s flathub.tar.gz
+          test -s sunshine.pkg.tar.gz
+
+          LC_ALL=C sha256sum -- * > ../SHA256SUMS.txt
+          mv ../SHA256SUMS.txt .
+          {
+            echo '### Verified release packages'
+            echo
+            printf -- '- %s\n' *
+          } >> "$GITHUB_STEP_SUMMARY"
       - name: Publish the GitHub release
+        if: github.ref == 'refs/heads/master' && !inputs.verify_only
         shell: bash
         env:
           GH_TOKEN: ${{ github.token }}
         run: |
           set -euo pipefail
-          cd release-assets
-          package_name="Sunshine-Open-VHF-$RELEASE_VERSION-Windows-x64"
-          sha256sum "$package_name.msi" "$package_name.zip" > SHA256SUMS.txt
           cat > release-notes.md <<'NOTES'
-          Windows x64 build of the Sunshine Open VHF fork.
+          Builds from the Sunshine Open VHF fork for Windows, macOS, Linux, and FreeBSD.
 
-          - **MSI:** Windows installer.
-          - **ZIP:** portable distribution.
-          - **SHA256SUMS.txt:** SHA-256 checksums for both downloads.
+          - **Windows x64 and ARM64:** MSI installers and portable ZIP archives.
+          - **macOS Apple Silicon and Intel:** DMG disk images with ad hoc signatures, without Apple notarization.
+          - **Linux:** AppImage, Flatpak, Debian/Ubuntu DEB, Fedora/openSUSE RPM, Arch Linux and Alpine packages.
+          - **FreeBSD:** amd64 PKG.
+          - **SHA256SUMS.txt:** SHA-256 checksums for all release downloads.
 
-          These are unsigned fork builds. Install the compatible [libvirtualgamepad Windows VHF driver](https://github.com/Nonary/libvirtualgamepad) separately to use the Open VHF backend.
+          Open VHF is a Windows gamepad backend. It requires a compatible, separately installed [libvirtualgamepad VHF driver](https://github.com/Nonary/libvirtualgamepad) for the host architecture. Linux, macOS, and FreeBSD use their platform input backends.
           NOTES
           tag="v$RELEASE_VERSION"
           tag_ref="refs/tags/$tag"
@@ -269,4 +339,4 @@ jobs:
           gh release create "$tag" \
             --repo "$GITHUB_REPOSITORY" --verify-tag --title "$RELEASE_VERSION" \
             --notes-file release-notes.md --latest \
-            "$package_name.msi" "$package_name.zip" SHA256SUMS.txt
+            release-assets/*
