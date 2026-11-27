@@ -216,7 +216,7 @@ jobs:
           app="$mount_point/Sunshine.app"
           binary="$app/Contents/MacOS/sunshine"
           codesign --verify --deep --strict "$app"
-          lipo -verify_arch "$MATRIX_ARCH" "$binary"
+          lipo "$binary" -verify_arch "$MATRIX_ARCH"
           "$binary" --version | grep -Fx "Sunshine version: $BUILD_VERSION"
 
       - name: Submit for notarization
