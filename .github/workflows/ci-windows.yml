@@ -82,6 +82,8 @@ jobs:
         with:
           msystem: ${{ matrix.msystem }}
           update: true
+          # Fork release ARM64 builds refresh signed MSYS2 repositories from the base install.
+          cache: ${{ inputs.release_source_ref == '' || matrix.arch != 'aarch64' }}
           install: >-
             wget
 
