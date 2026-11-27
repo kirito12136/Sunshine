@@ -1,6 +1,8 @@
 name: Release Open VHF for Windows
 
 on:
+  schedule:
+    - cron: '0 2 * * 6' # Saturday at 10:00 Asia/Shanghai
   workflow_dispatch:
     inputs:
       version:
@@ -16,22 +18,99 @@ permissions:
   contents: read
 
 concurrency:
-  group: release-open-vhf-${{ inputs.version }}
+  group: release-open-vhf
   cancel-in-progress: false
 
-env:
-  RELEASE_VERSION: ${{ inputs.version }}
-  SOURCE_SHA: ${{ inputs.source_sha }}
-
 jobs:
-  build:
+  plan:
     if: github.repository == 'kirito12136/Sunshine' && github.ref == 'refs/heads/master'
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    permissions:
+      actions: read
+      contents: read
+    outputs:
+      version: ${{ steps.select.outputs.version }}
+      source_sha: ${{ steps.select.outputs.source_sha }}
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          ref: open-vhf
+          fetch-depth: 0
+          persist-credentials: false
+      - name: Select the release version and commit
+        id: select
+        shell: bash
+        env:
+          GH_TOKEN: ${{ github.token }}
+          MANUAL_VERSION: ${{ inputs.version }}
+          MANUAL_SHA: ${{ inputs.source_sha }}
+        run: |
+          set -euo pipefail
+          semver='(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)'
+
+          if [[ "$GITHUB_EVENT_NAME" == workflow_dispatch ]]; then
+            version="$MANUAL_VERSION"
+            source_sha="$MANUAL_SHA"
+          else
+            latest_release=$(gh api "repos/$GITHUB_REPOSITORY/releases/latest" \
+              --jq '[.tag_name, .published_at] | @tsv')
+            IFS=$'\t' read -r latest_tag published_at <<< "$latest_release"
+            if [[ ! "$latest_tag" =~ ^v$semver$ || -z "$published_at" ]]; then
+              echo '::error::The latest release must have a vMAJOR.MINOR.PATCH tag and a publication time.'
+              exit 1
+            fi
+            version="${BASH_REMATCH[1]}.${BASH_REMATCH[2]}.$((BASH_REMATCH[3] + 1))"
+            source_sha=$(git rev-parse HEAD)
+            previous_sha=$(git rev-parse --verify "refs/tags/$latest_tag^{commit}")
+
+            if ! git merge-base --is-ancestor "$previous_sha" "$source_sha"; then
+              echo '::error::The latest release tag is outside the open-vhf branch history.'
+              exit 1
+            fi
+            if git diff --quiet "$previous_sha" "$source_sha" --; then
+              echo "No changes since $latest_tag." >> "$GITHUB_STEP_SUMMARY"
+              exit 0
+            fi
+
+            blocked_runs=$(gh api --paginate --method GET \
+              "repos/$GITHUB_REPOSITORY/actions/workflows/release-open-vhf.yml/runs" \
+              -f branch=master -f status=completed -f "created=>=$published_at" \
+              --jq '.workflow_runs[] | select(.conclusion != "success" and .conclusion != "skipped" and .conclusion != "neutral") | .html_url')
+            if [[ -n "$blocked_runs" ]]; then
+              printf 'Automatic publishing is on hold after a failed release run. Review %s before publishing again.\n' \
+                "${blocked_runs%%$'\n'*}" >> "$GITHUB_STEP_SUMMARY"
+              exit 0
+            fi
+            if git show-ref --verify --quiet "refs/tags/v$version"; then
+              echo "::error::Tag v$version already exists. Review it before publishing again."
+              exit 1
+            fi
+          fi
+
+          if [[ ! "$version" =~ ^$semver$ || ! "$source_sha" =~ ^[0-9a-f]{40}$ ]]; then
+            echo '::error::Use a MAJOR.MINOR.PATCH version and a full 40-character commit SHA.'
+            exit 1
+          fi
+          if ! git merge-base --is-ancestor "$source_sha" HEAD; then
+            echo '::error::The release commit must be part of open-vhf.'
+            exit 1
+          fi
+          printf 'version=%s\nsource_sha=%s\n' "$version" "$source_sha" >> "$GITHUB_OUTPUT"
+          printf 'Selected v%s from open-vhf commit %s.\n' "$version" "$source_sha" >> "$GITHUB_STEP_SUMMARY"
+
+  build:
+    needs: plan
+    if: needs.plan.outputs.source_sha != ''
+    env:
+      RELEASE_VERSION: ${{ needs.plan.outputs.version }}
+      SOURCE_SHA: ${{ needs.plan.outputs.source_sha }}
     runs-on: windows-2022
     timeout-minutes: 90
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
-          ref: ${{ inputs.source_sha }}
+          ref: ${{ needs.plan.outputs.source_sha }}
           fetch-depth: 0
           submodules: recursive
           persist-credentials: false
@@ -77,9 +156,9 @@ jobs:
         shell: msys2 {0}
         env:
           BRANCH: open-vhf
-          BUILD_VERSION: ${{ inputs.version }}
-          COMMIT: ${{ inputs.source_sha }}
-          TAG: v${{ inputs.version }}
+          BUILD_VERSION: ${{ needs.plan.outputs.version }}
+          COMMIT: ${{ needs.plan.outputs.source_sha }}
+          TAG: v${{ needs.plan.outputs.version }}
           DOTNET_ROLL_FORWARD: Major
         run: |
           set -euo pipefail
@@ -136,7 +215,10 @@ jobs:
           compression-level: 0
 
   publish:
-    needs: build
+    needs: [plan, build]
+    env:
+      RELEASE_VERSION: ${{ needs.plan.outputs.version }}
+      SOURCE_SHA: ${{ needs.plan.outputs.source_sha }}
     runs-on: ubuntu-latest
     timeout-minutes: 10
     permissions:
@@ -164,7 +246,27 @@ jobs:
 
           These are unsigned fork builds. Install the compatible [libvirtualgamepad Windows VHF driver](https://github.com/Nonary/libvirtualgamepad) separately to use the Open VHF backend.
           NOTES
-          gh release create "v$RELEASE_VERSION" \
-            --repo "$GITHUB_REPOSITORY" --target "$SOURCE_SHA" --title "$RELEASE_VERSION" \
+          tag="v$RELEASE_VERSION"
+          tag_ref="refs/tags/$tag"
+          if tag_refs=$(git ls-remote --exit-code "https://github.com/$GITHUB_REPOSITORY.git" "$tag_ref" "$tag_ref^{}"); then
+            tag_sha=$(awk -v ref="$tag_ref" '
+              $2 == ref { tag = $1 }
+              $2 == ref "^{}" { commit = $1 }
+              END { print (commit == "" ? tag : commit) }
+            ' <<< "$tag_refs")
+            if [[ "$tag_sha" != "$SOURCE_SHA" ]]; then
+              echo "::error::Tag $tag already points to another commit."
+              exit 1
+            fi
+          else
+            status=$?
+            if [[ "$status" != 2 ]]; then
+              exit "$status"
+            fi
+            gh api --method POST "repos/$GITHUB_REPOSITORY/git/refs" \
+              -f ref="$tag_ref" -f sha="$SOURCE_SHA" >/dev/null
+          fi
+          gh release create "$tag" \
+            --repo "$GITHUB_REPOSITORY" --verify-tag --title "$RELEASE_VERSION" \
             --notes-file release-notes.md --latest \
             "$package_name.msi" "$package_name.zip" SHA256SUMS.txt
