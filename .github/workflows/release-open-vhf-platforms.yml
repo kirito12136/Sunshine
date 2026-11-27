@@ -130,10 +130,10 @@ jobs:
             --set "$TARGET.args.BRANCH=open-vhf" \
             --set "$TARGET.args.BUILD_VERSION=$RELEASE_VERSION" \
             --set "$TARGET.args.COMMIT=$SOURCE_SHA" \
-            --set "$TARGET.output=type=local,dest=$RUNNER_TEMP/deb-out"
+            --set "$TARGET.output=type=local,dest=./deb-out"
 
           shopt -s nullglob
-          packages=("$RUNNER_TEMP/deb-out/artifacts/"*.deb)
+          packages=(deb-out/artifacts/*.deb)
           if (( ${#packages[@]} != 1 )); then
             echo "::error::Expected one DEB for $TARGET ($EXPECTED_ARCH)."
             exit 1
